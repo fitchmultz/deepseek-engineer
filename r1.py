@@ -4,19 +4,20 @@ import logging
 import os
 import sys
 import json
+import time
 from pathlib import Path
 from textwrap import dedent
 from typing import List, Dict, Any, Optional
 from openai import OpenAI
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from rate_limiter import RateLimiter
 from rich.console import Console, Group
 from rich.table import Table
 from rich.panel import Panel
 from rich.rule import Rule
 from prompt_toolkit import PromptSession
 from prompt_toolkit.styles import Style as PromptStyle
+from collections import deque
 
 # Initialize Rich console and prompt session
 console = Console()
@@ -44,6 +45,32 @@ client = OpenAI(
     api_key=os.getenv("DEEPSEEK_API_KEY"),
     base_url="https://api.deepseek.com"
 )  # Configure for DeepSeek API
+
+class RateLimiter:
+    def __init__(self, max_calls: int, period: float):
+        self.max_calls = max_calls
+        self.period = period
+        self.timestamps = deque()
+
+    def __call__(self):
+        now = time.time()
+        while self.timestamps and now - self.timestamps[0] > self.period:
+            self.timestamps.popleft()
+
+        if len(self.timestamps) >= self.max_calls:
+            time_to_wait = self.period - (now - self.timestamps[0])
+            time.sleep(time_to_wait)
+            now = time.time()
+
+        self.timestamps.append(now)
+        return now
+
+    def __enter__(self):
+        self()
+        return self
+
+    def __exit__(self, *args):
+        pass
 
 # --------------------------------------------------------------------------------
 # 2. Define our schema using Pydantic for type safety
