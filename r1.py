@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import logging
 import os
 import sys
 import json
@@ -9,9 +10,12 @@ from typing import List, Dict, Any, Optional
 from openai import OpenAI
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from rate_limiter import RateLimiter
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
+from rich.rule import Rule
+from rich.console import Group
 from rich.style import Style
 from prompt_toolkit import PromptSession
 from prompt_toolkit.styles import Style as PromptStyle
@@ -69,11 +73,11 @@ system_PROMPT = dedent("""\
        a) Read existing files
           - Access user-provided file contents for context
           - Analyze multiple files to understand project structure
-       
+
        b) Create new files
           - Generate complete new files with proper structure
           - Create complementary files (tests, configs, etc.)
-       
+
        c) Edit existing files
           - Make precise changes using diff-based editing
           - Modify specific sections while preserving context
@@ -116,7 +120,7 @@ system_PROMPT = dedent("""\
 """)
 
 # --------------------------------------------------------------------------------
-# 4. Helper functions 
+# 4. Helper functions
 # --------------------------------------------------------------------------------
 
 def read_local_file(file_path: str) -> str:
@@ -124,40 +128,59 @@ def read_local_file(file_path: str) -> str:
     with open(file_path, "r", encoding="utf-8") as f:
         return f.read()
 
-def create_file(path: str, content: str):
+def create_file(path: str, content: str, require_confirmation: bool = True):
     """Create (or overwrite) a file at 'path' with the given 'content'."""
-    file_path = Path(path)
-    
-    # Security checks
-    if any(part.startswith('~') for part in file_path.parts):
-        raise ValueError("Home directory references not allowed")
-    normalized_path = normalize_path(str(file_path))
-    
-    # Validate reasonable file size for operations
-    if len(content) > 5_000_000:  # 5MB limit
-        raise ValueError("File content exceeds 5MB size limit")
-    
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(content)
-    console.print(f"[green]✓[/green] Created/updated file at '[cyan]{file_path}[/cyan]'")
-    
-    # Record the action as a system message
-    conversation_history.append({
-        "role": "system",
-        "content": f"File operation: Created/updated file at '{file_path}'"
-    })
-    
-    normalized_path = normalize_path(str(file_path))
-    conversation_history.append({
-        "role": "system",
-        "content": f"Content of file '{normalized_path}':\n\n{content}"
-    })
+    logger = logging.getLogger(__name__)
+    try:
+        file_path = Path(path)
+
+        # Security checks
+        if any(part.startswith('~') for part in file_path.parts):
+            raise ValueError("Home directory references not allowed")
+        normalized_path = normalize_path(str(file_path))
+
+        # Validate reasonable file size for operations
+        if len(content) > 5_000_000:  # 5MB limit
+            raise ValueError("File content exceeds 5MB size limit")
+
+        # Confirm file creation
+        if require_confirmation:
+            user_confirm = prompt_session.prompt(
+                f"Do you want to create/overwrite file at '{normalized_path}'? (y/n): "
+            ).strip().lower()
+        else:
+            user_confirm = 'y'  # Default to 'y' when confirmation is not required
+
+        if user_confirm != 'y' and user_confirm:  # Handle both skipped prompt and 'n' answer
+            logger.info(f"Skipped file creation at '{normalized_path}'")
+            console.print(f"[yellow]ℹ[/yellow] Skipped file creation at '[cyan]{normalized_path}[/cyan]'", style="yellow")
+            return
+
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        logger.info(f"Created/updated file at '{file_path}'")
+        console.print(f"[green]✓[/green] Created/updated file at '[cyan]{file_path}[/cyan]'")
+
+        # Record the action as a system message
+        conversation_history.append({
+            "role": "system",
+            "content": f"File operation: Created/updated file at '{file_path}'"
+        })
+
+        normalized_path = normalize_path(str(file_path))
+        conversation_history.append({
+            "role": "system",
+            "content": f"Content of file '{normalized_path}':\n\n{content}"
+        })
+    except Exception as e:
+        logger.error(f"Failed to create file at '{path}': {str(e)}")
+        console.print(f"[red]✗[/red] Failed to create file at '[cyan]{path}[/cyan]': {str(e)}", style="red")
 
 def show_diff_table(files_to_edit: List[FileToEdit]) -> None:
     if not files_to_edit:
         return
-    
+
     table = Table(title="Proposed Edits", show_header=True, header_style="bold magenta", show_lines=True)
     table.add_column("File Path", style="cyan")
     table.add_column("Original", style="red")
@@ -165,14 +188,14 @@ def show_diff_table(files_to_edit: List[FileToEdit]) -> None:
 
     for edit in files_to_edit:
         table.add_row(edit.path, edit.original_snippet, edit.new_snippet)
-    
+
     console.print(table)
 
 def apply_diff_edit(path: str, original_snippet: str, new_snippet: str):
     """Reads the file at 'path', replaces the first occurrence of 'original_snippet' with 'new_snippet', then overwrites."""
     try:
         content = read_local_file(path)
-        
+
         # Verify we're replacing the exact intended occurrence
         occurrences = content.count(original_snippet)
         if occurrences == 0:
@@ -181,9 +204,9 @@ def apply_diff_edit(path: str, original_snippet: str, new_snippet: str):
             console.print(f"[yellow]Multiple matches ({occurrences}) found - requiring line numbers for safety", style="yellow")
             console.print("Use format:\n--- original.py (lines X-Y)\n+++ modified.py\n")
             raise ValueError(f"Ambiguous edit: {occurrences} matches")
-        
+
         updated_content = content.replace(original_snippet, new_snippet, 1)
-        create_file(path, updated_content)
+        create_file(path, updated_content, require_confirmation=False)
         console.print(f"[green]✓[/green] Applied diff edit to '[cyan]{path}[/cyan]'")
         # Record the edit as a system message
         conversation_history.append({
@@ -266,12 +289,14 @@ def add_directory_to_conversation(directory_path: str):
         skipped_files = []
         added_files = []
         total_files_processed = 0
+        total_size = 0
         max_files = 1000  # Reasonable limit for files to process
-        max_file_size = 5_000_000  # 5MB limit
+        max_file_size = 5_000_000  # 5MB limit per file
+        MAX_TOTAL_SIZE = 50_000_000  # 50MB total limit
 
         for root, dirs, files in os.walk(directory_path):
-            if total_files_processed >= max_files:
-                console.print(f"[yellow]⚠[/yellow] Reached maximum file limit ({max_files})")
+            if total_files_processed >= max_files or total_size >= MAX_TOTAL_SIZE:
+                console.print(f"[yellow]⚠[/yellow] Reached limit: {total_files_processed} files, {total_size/1_000_000:.1f}MB total")
                 break
 
             status.update(f"[bold green]Scanning {root}...")
@@ -279,7 +304,7 @@ def add_directory_to_conversation(directory_path: str):
             dirs[:] = [d for d in dirs if not d.startswith('.') and d not in excluded_files]
 
             for file in files:
-                if total_files_processed >= max_files:
+                if total_files_processed >= max_files or total_size >= MAX_TOTAL_SIZE:
                     break
 
                 if file.startswith('.') or file in excluded_files:
@@ -295,8 +320,13 @@ def add_directory_to_conversation(directory_path: str):
 
                 try:
                     # Check file size before processing
-                    if os.path.getsize(full_path) > max_file_size:
+                    file_size = os.path.getsize(full_path)
+                    if file_size > max_file_size:
                         skipped_files.append(f"{full_path} (exceeds size limit)")
+                        continue
+
+                    if total_size + file_size > MAX_TOTAL_SIZE:
+                        skipped_files.append(f"{full_path} (would exceed total size limit)")
                         continue
 
                     # Check if it's binary
@@ -312,11 +342,15 @@ def add_directory_to_conversation(directory_path: str):
                     })
                     added_files.append(normalized_path)
                     total_files_processed += 1
+                    total_size += file_size
 
                 except OSError:
                     skipped_files.append(full_path)
+                except ValueError as e:
+                    skipped_files.append(f"{full_path} ({str(e)})")
 
         console.print(f"[green]✓[/green] Added folder '[cyan]{directory_path}[/cyan]' to conversation.")
+        console.print(f"Total size: {total_size/1_000_000:.1f}MB")
         if added_files:
             console.print(f"\n[bold]Added files:[/bold] ({len(added_files)} of {total_files_processed})")
             for f in added_files:
@@ -356,13 +390,20 @@ def ensure_file_in_context(file_path: str) -> bool:
 
 def normalize_path(path_str: str) -> str:
     """Return a canonical, absolute version of the path with security checks."""
-    path = Path(path_str).resolve()
-    
-    # Prevent directory traversal attacks
-    if ".." in path.parts:
-        raise ValueError(f"Invalid path: {path_str} contains parent directory references")
-    
-    return str(path)
+    try:
+        path = Path(path_str)
+        if not path.is_absolute():
+            path = path.absolute()
+        path = path.resolve()
+
+        # Ensure path is within workspace
+        workspace = Path(os.getcwd()).resolve()
+        if not str(path).startswith(str(workspace)):
+            raise ValueError(f"Invalid path: {path_str} is outside workspace directory")
+
+        return str(path)
+    except Exception as e:
+        raise ValueError(f"Invalid path: {path_str} - {str(e)}")
 
 # --------------------------------------------------------------------------------
 # 5. Conversation state
@@ -393,13 +434,13 @@ def stream_openai_response(user_message: str):
     system_msgs = [conversation_history[0]]  # Keep initial system prompt
     file_context = []
     user_assistant_pairs = []
-    
+
     for msg in conversation_history[1:]:
         if msg["role"] == "system" and "Content of file '" in msg["content"]:
             file_context.append(msg)
         elif msg["role"] in ["user", "assistant"]:
             user_assistant_pairs.append(msg)
-    
+
     # Only keep complete user-assistant pairs
     if len(user_assistant_pairs) % 2 != 0:
         user_assistant_pairs = user_assistant_pairs[:-1]
@@ -408,7 +449,7 @@ def stream_openai_response(user_message: str):
     cleaned_history = system_msgs + file_context
     cleaned_history.extend(user_assistant_pairs)
     cleaned_history.append({"role": "user", "content": user_message})
-    
+
     # Replace conversation_history with cleaned version
     conversation_history.clear()
     conversation_history.extend(cleaned_history)
@@ -452,18 +493,54 @@ def stream_openai_response(user_message: str):
                 console.print(chunk.choices[0].delta.reasoning_content, end="")
                 reasoning_content += chunk.choices[0].delta.reasoning_content
             elif chunk.choices[0].delta.content:
-                if reasoning_started:
-                    console.print("\n")  # Add spacing after reasoning
-                    console.print("\nAssistant> ", style="bold blue", end="")
-                    reasoning_started = False  # Reset so we don't add extra spacing
                 final_content += chunk.choices[0].delta.content
-                console.print(chunk.choices[0].delta.content, end="")
 
-        console.print()  # New line after streaming
+        console.clear_live()
+        console.show_cursor(True)
+        console.print("\n")
+
+        # Extract JSON from code block if present
+        json_str = final_content
+        if '```json' in final_content:
+            json_str = final_content.split('```json')[1].split('```')[0].strip()
+        elif '```' in final_content:
+            json_str = final_content.split('```')[1].split('```')[0].strip()
 
         try:
-            parsed_response = json.loads(final_content)
-            
+            parsed_response = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            error_msg = "Failed to parse JSON response from assistant"
+            console.print(f"[red]✗[/red] {error_msg}", style="red")
+            console.print(Panel(final_content, title="[red]Invalid JSON Response[/red]", border_style="red"))
+            return AssistantResponse(
+                assistant_reply=error_msg,
+                files_to_create=[]
+            )
+
+        # Extract and format assistant reply
+        assistant_reply = parsed_response.get("assistant_reply", "")
+        parts = [part.strip() for part in assistant_reply.split("|")]
+        renderables = []
+
+        for part in parts:
+            renderables.append(console.render_str(part))
+            renderables.append(Rule(style="dim"))
+
+        if len(parts) > 0:
+            renderables = renderables[:-1]  # Remove last rule
+
+        # Display formatted reply
+        console.print(
+            Panel.fit(
+                Group(*renderables),
+                title="[bold green]🤖 DeepSeek Engineer[/bold green]",
+                border_style="green",
+                padding=(1, 4),
+                subtitle="[dim]Full JSON preserved for tool execution[/dim]"
+            )
+        )
+
+        try:
             if "assistant_reply" not in parsed_response:
                 parsed_response["assistant_reply"] = ""
 
@@ -490,9 +567,9 @@ def stream_openai_response(user_message: str):
 
             return response_obj
 
-        except json.JSONDecodeError:
-            error_msg = "Failed to parse JSON response from assistant"
-            console.print(f"[red]✗[/red] {error_msg}", style="red")
+        except Exception as e:
+            error_msg = f"DeepSeek API error: {str(e)}"
+            console.print(f"\n[red]✗[/red] {error_msg}", style="red")
             return AssistantResponse(
                 assistant_reply=error_msg,
                 files_to_create=[]
@@ -511,11 +588,11 @@ def trim_conversation_history():
     max_pairs = 10  # Adjust based on your needs
     system_msgs = [msg for msg in conversation_history if msg["role"] == "system"]
     other_msgs = [msg for msg in conversation_history if msg["role"] != "system"]
-    
+
     # Keep only the last max_pairs of user-assistant interactions
     if len(other_msgs) > max_pairs * 2:
         other_msgs = other_msgs[-max_pairs * 2:]
-    
+
     conversation_history.clear()
     conversation_history.extend(system_msgs + other_msgs)
 
@@ -524,6 +601,26 @@ def trim_conversation_history():
 # --------------------------------------------------------------------------------
 
 def main():
+    # Initialize logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('deepseek_engineer.log'),
+            logging.StreamHandler()
+        ]
+    )
+    logger = logging.getLogger(__name__)
+
+    # Validate OpenAI API key
+    if not os.getenv("DEEPSEEK_API_KEY"):
+        logger.error("DEEPSEEK_API_KEY environment variable not set")
+        console.print("[red]✗[/red] DEEPSEEK_API_KEY environment variable not set", style="red")
+        return
+
+    # Initialize rate limiter
+    rate_limiter = RateLimiter(max_calls=5, period=1)  # 5 calls per second
+
     console.print(Panel.fit(
         "[bold blue]Welcome to Deep Seek Engineer with Structured Output[/bold blue] [green](and CoT reasoning)[/green]!🐋",
         border_style="blue"
@@ -553,7 +650,8 @@ def main():
         if try_handle_add_command(user_input):
             continue
 
-        response_data = stream_openai_response(user_input)
+        with rate_limiter:
+            response_data = stream_openai_response(user_input)
 
         if response_data.files_to_create:
             for file_info in response_data.files_to_create:
@@ -561,10 +659,10 @@ def main():
 
         if response_data.files_to_edit:
             show_diff_table(response_data.files_to_edit)
-            confirm = prompt_session.prompt(
+            user_confirm = prompt_session.prompt(
                 "Do you want to apply these changes? (y/n): "
             ).strip().lower()
-            if confirm == 'y':
+            if user_confirm == 'y':
                 for edit_info in response_data.files_to_edit:
                     apply_diff_edit(edit_info.path, edit_info.original_snippet, edit_info.new_snippet)
             else:
