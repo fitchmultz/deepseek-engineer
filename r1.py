@@ -182,7 +182,7 @@ def create_file(path: str, content: str, require_confirmation: bool = True):
             "content": f"Content of file '{normalized_path}':\n\n{content}"
         })
     except Exception as e:
-        logger.error(f"Failed to create file at '{path}': {str(e)}")
+        logger.exception(f"Failed to create file at '{path}'")
         console.print(f"[red]✗[/red] Failed to create file at '[cyan]{path}[/cyan]': {str(e)}", style="red")
 
 def show_diff_table(files_to_edit: List[FileToEdit]) -> None:
@@ -222,10 +222,10 @@ def apply_diff_edit(path: str, original_snippet: str, new_snippet: str):
             "content": f"File operation: Applied diff edit to '{path}'"
         })
     except FileNotFoundError:
-        logger.error(f"File not found for diff editing: {path}")
+        logger.exception(f"File not found for diff editing: {path}")
         console.print(f"[red]✗[/red] File not found for diff editing: '[cyan]{path}[/cyan]'", style="red")
     except OSError as e:
-        console.print(f"[red]✗[/red] OS error occurred while editing '[cyan]{path}[/cyan]': {e}", style="red")
+        logger.exception(f"OS error occurred while editing '{path}'")
     except ValueError as e:
         console.print(f"[yellow]⚠[/yellow] {str(e)} in '[cyan]{path}[/cyan]'. No changes made.", style="yellow")
         console.print("\nExpected snippet:", style="yellow")
