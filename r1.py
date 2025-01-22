@@ -25,6 +25,16 @@ prompt_session = PromptSession(
         'prompt': '#00aa00 bold',  # Green prompt
     })
 )
+# Initialize logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('deepseek_engineer.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------------
 # 1. Configure OpenAI client and load environment variables
@@ -212,6 +222,7 @@ def apply_diff_edit(path: str, original_snippet: str, new_snippet: str):
             "content": f"File operation: Applied diff edit to '{path}'"
         })
     except FileNotFoundError:
+        logger.error(f"File not found for diff editing: {path}")
         console.print(f"[red]✗[/red] File not found for diff editing: '[cyan]{path}[/cyan]'", style="red")
     except OSError as e:
         console.print(f"[red]✗[/red] OS error occurred while editing '[cyan]{path}[/cyan]': {e}", style="red")
@@ -602,17 +613,6 @@ def trim_conversation_history():
 # --------------------------------------------------------------------------------
 
 def main():
-    # Initialize logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler('deepseek_engineer.log'),
-            logging.StreamHandler()
-        ]
-    )
-    logger = logging.getLogger(__name__)
-
     # Validate OpenAI API key
     if not os.getenv("DEEPSEEK_API_KEY"):
         logger.error("DEEPSEEK_API_KEY environment variable not set")
