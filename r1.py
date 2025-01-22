@@ -510,7 +510,7 @@ def stream_openai_response(user_message: str):
         try:
             parsed_response = json.loads(json_str)
         except json.JSONDecodeError as e:
-            error_msg = "Failed to parse JSON response from assistant"
+            error_msg = f"Failed to parse JSON response from assistant: {str(e)}"
             console.print(f"[red]✗[/red] {error_msg}", style="red")
             console.print(Panel(final_content, title="[red]Invalid JSON Response[/red]", border_style="red"))
             return AssistantResponse(
