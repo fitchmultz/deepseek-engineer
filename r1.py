@@ -11,12 +11,10 @@ from openai import OpenAI
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from rate_limiter import RateLimiter
-from rich.console import Console
+from rich.console import Console, Group
 from rich.table import Table
 from rich.panel import Panel
 from rich.rule import Rule
-from rich.console import Group
-from rich.style import Style
 from prompt_toolkit import PromptSession
 from prompt_toolkit.styles import Style as PromptStyle
 
@@ -486,14 +484,15 @@ def stream_openai_response(user_message: str):
         final_content = ""
 
         for chunk in stream:
-            if chunk.choices[0].delta.reasoning_content:
+            delta = chunk.choices[0].delta
+            if delta.reasoning_content:
                 if not reasoning_started:
                     console.print("\nReasoning:", style="bold yellow")
                     reasoning_started = True
-                console.print(chunk.choices[0].delta.reasoning_content, end="")
-                reasoning_content += chunk.choices[0].delta.reasoning_content
-            elif chunk.choices[0].delta.content:
-                final_content += chunk.choices[0].delta.content
+                console.print(delta.reasoning_content, end="")
+                reasoning_content += delta.reasoning_content
+            if delta.content:
+                final_content += delta.content
 
         console.clear_live()
         console.show_cursor(True)
