@@ -213,6 +213,8 @@ def apply_diff_edit(path: str, original_snippet: str, new_snippet: str):
         })
     except FileNotFoundError:
         console.print(f"[red]✗[/red] File not found for diff editing: '[cyan]{path}[/cyan]'", style="red")
+    except OSError as e:
+        console.print(f"[red]✗[/red] OS error occurred while editing '[cyan]{path}[/cyan]': {e}", style="red")
     except ValueError as e:
         console.print(f"[yellow]⚠[/yellow] {str(e)} in '[cyan]{path}[/cyan]'. No changes made.", style="yellow")
         console.print("\nExpected snippet:", style="yellow")
